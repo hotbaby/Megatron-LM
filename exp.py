@@ -33,7 +33,12 @@ class Config:
     # train configuration
     steps: int
     batch_size: int
+    # 混合精度训练
     fp16: bool
+    # activation checkpoint
+    activation_ckpt: bool
+    # 梯度累计
+    grad_accum: bool
     
     # model configuration
     lm: LMConfig
@@ -52,6 +57,7 @@ class Metrics:
     optimizer: float
     communication: float
     memory: float
+    samples_per_second: float
 
 
 def print_metrics(metrics: Metrics, scheme: str):
@@ -59,11 +65,12 @@ def print_metrics(metrics: Metrics, scheme: str):
     communication = metrics.communication
 
     print(f"{scheme}: "
-          f"forward-backward: {metrics.forward_backward:.2f} ms, "
-          f"optimizer: {metrics.optimizer:.2f} ms,"
-          f"communication: {communication:,.2f} ms, "
+          f"forward-backward: {metrics.forward_backward:.2f}ms, "
+          f"optimizer: {metrics.optimizer:.2f}ms, "
+          f"communication: {communication:,.2f}ms, "
           f"compute/total ratio: {compute/(compute+communication):,.2f}, "
-          f"memory: {metrics.memory:,} M")
+          f"memory: {metrics.memory:,}M "
+          f"samples_per_second: {int(metrics.samples_per_second)}")
 
 
 # metrics = Metrics(forward_backward=300, forward=100, backward=200, communication=10, optimizer=10, memory=200)
@@ -74,11 +81,11 @@ def print_metrics(metrics: Metrics, scheme: str):
 def plot(data: pd.DataFrame):
     ncols = len(data.columns)
     x = list(data.index)
-    _, axs = plt.subplots(ncols=ncols, figsize=(16, 1))
+    _, axs = plt.subplots(ncols=ncols, figsize=(16, 2))
 
     for i, metric in enumerate(data.columns):
-        y = list(data[metric].values)
-        axs[i].barh(x, y)
+        y = list(map(lambda x: float(x), data[metric].values))
+        axs[i].barh(x, y, height=0.8)
         axs[i].set_xlabel(metric)
 
     plt.show()
@@ -99,6 +106,13 @@ def parse_log(log_file: str):
 
     if re.compile("OOM|Traceback").findall(log_content):
         return None
+
+    # 没秒消耗的样本数
+    match_results = re.compile("consumed samples:\ +(\d+)").findall(log_content)
+    consumed_samples =  float(match_results[0]) if match_results else 0
+    match_results =  re.compile("elapsed time per iteration \(ms\): ([\d\.]+)").findall(log_content)
+    elapse_time_per_iter = float(match_results[0]) if match_results else 1
+    samples_per_second = int(consumed_samples / (elapse_time_per_iter / 1000))
 
     time_metrics = ["forward-backward", "forward-compute", 
                     "backward-compute", "optimizer",
@@ -123,7 +137,8 @@ def parse_log(log_file: str):
                     backward=time_metric_dict["backward-compute"],
                     optimizer=time_metric_dict["optimizer"],
                     communication=time_metric_dict["grads-all-reduce"],
-                    memory=memory_size)
+                    memory=memory_size,
+                    samples_per_second=samples_per_second)
 
     return metrics
 
@@ -132,6 +147,8 @@ def parse_log(log_file: str):
 
 
 def train_model(cfg: Config):
+    global_size = cfg.batch_size * cfg.gpus_per_node
+
     cmd = f"""torchrun --nproc_per_node {cfg.gpus_per_node} --nnodes 1 --node_rank 0 pretrain_gpt.py \
     --distributed-backend nccl \
     --tensor-model-parallel-size {cfg.tensor_parallel_size} \
@@ -142,7 +159,7 @@ def train_model(cfg: Config):
     --seq-length 1024 \
     --max-position-embeddings 1024 \
     --micro-batch-size {cfg.batch_size} \
-    --global-batch-size {cfg.batch_size} \
+    --global-batch-size {global_size} \
     --train-iters {cfg.steps} \
     --lr 0.00015 \
     --lr-decay-iters 320000 \
@@ -157,9 +174,15 @@ def train_model(cfg: Config):
     --vocab-file /data/datasets/gpt2/gpt2-vocab.json \
     --merge-file /data/datasets/gpt2/gpt2-merges.txt \
     --data-impl mmap """
-    
+
     if cfg.fp16:
         cmd += " --fp16 "
+
+    if cfg.activation_ckpt:
+        cmd += " --recompute-activations "
+
+    if cfg.grad_accum:
+        cmd += " --accumulate-allreduce-grads-in-fp32 "
 
     # 日志输出到train.log文件
     cmd += " > train.log 2>&1"
