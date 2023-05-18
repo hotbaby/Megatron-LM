@@ -35,8 +35,6 @@ class Config:
     batch_size: int
     # 混合精度训练
     fp16: bool
-    # activation checkpoint
-    activation_ckpt: bool
     # 梯度累计
     grad_accum: bool
     
@@ -47,6 +45,9 @@ class Config:
     data_parallel_size: int = 1
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
+    
+    # activation checkpoint
+    activation_ckpt: bool = False
 
 
 @dataclasses.dataclass
@@ -81,7 +82,8 @@ def print_metrics(metrics: Metrics, scheme: str):
 def plot(data: pd.DataFrame):
     ncols = len(data.columns)
     x = list(data.index)
-    _, axs = plt.subplots(ncols=ncols, figsize=(16, 2))
+    fig, axs = plt.subplots(ncols=ncols, figsize=(16, 2.4))
+    fig.subplots_adjust(wspace=0.42)
 
     for i, metric in enumerate(data.columns):
         y = list(map(lambda x: float(x), data[metric].values))
@@ -92,9 +94,9 @@ def plot(data: pd.DataFrame):
 
 # 测试plot函数
 # data = {scheme: {"compute": random.randint(1, 10), 
-#                  "optimizer": random.randint(1, 10), 
-#                  "memory": random.randint(10,100), 
-#                  "communication": random.randint(100, 1000)} for scheme in ["base", "fp16"]}
+# #                  "optimizer": random.randint(1, 10), 
+# #                  "memory": random.randint(10,100), 
+#                  "communication": random.randint(100, 1000)} for scheme in ["base", "fp16", "mp=2,\npp=2"]}
 # data = pd.DataFrame(data).T
 # plot(data)
 
@@ -147,7 +149,7 @@ def parse_log(log_file: str):
 
 
 def train_model(cfg: Config):
-    global_size = cfg.batch_size * cfg.gpus_per_node
+    # global_size = cfg.batch_size * cfg.gpus_per_node
 
     cmd = f"""torchrun --nproc_per_node {cfg.gpus_per_node} --nnodes 1 --node_rank 0 pretrain_gpt.py \
     --distributed-backend nccl \
@@ -159,7 +161,6 @@ def train_model(cfg: Config):
     --seq-length 1024 \
     --max-position-embeddings 1024 \
     --micro-batch-size {cfg.batch_size} \
-    --global-batch-size {global_size} \
     --train-iters {cfg.steps} \
     --lr 0.00015 \
     --lr-decay-iters 320000 \
