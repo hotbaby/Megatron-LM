@@ -35,8 +35,6 @@ class Config:
     batch_size: int
     # 混合精度训练
     fp16: bool
-    # 梯度累计
-    grad_accum: bool
     
     # model configuration
     lm: LMConfig
@@ -45,9 +43,15 @@ class Config:
     data_parallel_size: int = 1
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
-    
+
     # activation checkpoint
     activation_ckpt: bool = False
+    
+    # Gradient Accumulation
+    grad_accum: bool = False
+
+    # 节点数
+    nnodes: int = 1
 
 
 @dataclasses.dataclass
@@ -65,16 +69,11 @@ def print_metrics(metrics: Metrics, scheme: str):
     compute = metrics.forward_backward + metrics.optimizer
     communication = metrics.communication
 
-    print(f"{scheme}: "
-          f"forward-backward: {metrics.forward_backward:.2f}ms, "
-          f"optimizer: {metrics.optimizer:.2f}ms, "
-          f"communication: {communication:,.2f}ms, "
-          f"compute/total ratio: {compute/(compute+communication):,.2f}, "
-          f"memory: {metrics.memory:,}M "
-          f"samples_per_second: {int(metrics.samples_per_second)}")
+    print(f"{scheme}: {json.dumps(dataclasses.asdict(metrics))}")
 
 
-# metrics = Metrics(forward_backward=300, forward=100, backward=200, communication=10, optimizer=10, memory=200)
+# metrics = Metrics(forward_backward=300, forward=100, backward=200, communication=10,
+#                   optimizer=10, memory=200, samples_per_second=2)
 # print_metrics(metrics, "base")
 
 
@@ -102,6 +101,7 @@ def plot(data: pd.DataFrame):
 
 
 def parse_log(log_file: str):
+    precision = 2
     
     with open(log_file, "r") as f:
         log_content = f.read()
@@ -109,12 +109,14 @@ def parse_log(log_file: str):
     if re.compile("OOM|Traceback").findall(log_content):
         return None
 
-    # 没秒消耗的样本数
-    match_results = re.compile("consumed samples:\ +(\d+)").findall(log_content)
-    consumed_samples =  float(match_results[0]) if match_results else 0
+    # 每秒消耗的样本数（最后一个值）
+    match_results = re.compile("global_batch_size .+ (\d+)").findall(log_content)
+    global_batch_size = int(float(match_results[0])) if match_results else 1
+    # match_results = re.compile("consumed samples:\ +(\d+)").findall(log_content)
+    # consumed_samples =  list(map(float, match_results))[-1] if match_results else 0
     match_results =  re.compile("elapsed time per iteration \(ms\): ([\d\.]+)").findall(log_content)
-    elapse_time_per_iter = float(match_results[0]) if match_results else 1
-    samples_per_second = int(consumed_samples / (elapse_time_per_iter / 1000))
+    elapse_time_per_iter = list(map(float, match_results))[-1] if match_results else 1
+    samples_per_second = round(float(global_batch_size / (elapse_time_per_iter / 1000)), precision)
 
     time_metrics = ["forward-backward", "forward-compute", 
                     "backward-compute", "optimizer",
@@ -122,17 +124,19 @@ def parse_log(log_file: str):
 
     time_metric_dict = {}
 
-    for metric in time_metrics: 
-        match_results = re.compile(f" {metric} .+\(([\d\.]+)").findall(log_content)
-        match_results = list(map(lambda x: float(x), match_results))
+    for metric in time_metrics:
+        match_results = re.compile(f" {metric} .+, ([\d\.]+)").findall(log_content)
+        match_results = list(map(lambda x: float(x), match_results))[1:]
+        # [1:]均值
         val = sum(match_results)/len(match_results) if match_results else 0
-        time_metric_dict[metric] = val
-        
+        time_metric_dict[metric] = round(val, precision)
+
     # print(time_metric_dict)
 
+    # 显存占用指标（最大值）
     match_results = re.compile("max allocated: ([\d\.]+)").findall(log_content)
     match_results = list(map(lambda x: float(x), match_results))
-    memory_size = int(sum(match_results)/len(match_results)) if match_results else 0
+    memory_size = int(max(match_results)) if match_results else 0
 
     metrics =  Metrics(forward_backward=time_metric_dict["forward-backward"],
                     forward=time_metric_dict["forward-compute"],
@@ -151,7 +155,7 @@ def parse_log(log_file: str):
 def train_model(cfg: Config):
     # global_size = cfg.batch_size * cfg.gpus_per_node
 
-    cmd = f"""torchrun --nproc_per_node {cfg.gpus_per_node} --nnodes 1 --node_rank 0 pretrain_gpt.py \
+    cmd = f"""torchrun --nproc_per_node {cfg.gpus_per_node} --nnodes {cfg.nnodes} --node_rank 0 pretrain_gpt.py \
     --distributed-backend nccl \
     --tensor-model-parallel-size {cfg.tensor_parallel_size} \
     --pipeline-model-parallel-size {cfg.pipeline_parallel_size} \
