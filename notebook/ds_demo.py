@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import deepspeed
+from deepspeed.profiling.flops_profiler import FlopsProfiler
 from deepspeed import DeepSpeedEngine
 
 
@@ -48,7 +49,7 @@ class DummyDataset(Dataset):
 
 
 def get_model(input_dim=1024, output_dim=1024, hidden_dim=2048):
-    model = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, output_dim))
+    model = nn.Sequential(nn.Linear(input_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, output_dim, bias=False))
     return model
 
 
@@ -59,7 +60,8 @@ if args.deepspeed:
 
 ds = DummyDataset()
 model = get_model()
-model.cuda()
+
+model.cuda(get_device())
 
 if args.deepspeed:
     model_engine, optimzier, dataloader, _ = deepspeed.initialize(args, model=model, training_data=ds)
@@ -77,7 +79,7 @@ def train():
         device = get_device()
         inputs = inputs.to(device)
         labels = labels.to(device)
-
+        
         if args.deepspeed:
             outputs = model_engine(inputs)
             loss = criterion(outputs, labels)
@@ -94,5 +96,25 @@ def train():
         print(f"iteration {i+1}/{total_iterations}, loss: {loss:.2f}")
 
 
+def benchmark_flops_profiler():
+    device = get_device()
+    inputs, labels = next(iter(dataloader))
+    inputs = inputs.to(device)
+    labels = labels.to(device)
+
+    prof = FlopsProfiler(model=model)
+    prof.start_profile()
+
+    model(inputs)
+
+    total_flops = prof.get_total_flops(True)
+    print(model)
+    print(f"inputs: {inputs.size()}")
+    print(f"total flops: {total_flops}")
+
+    prof.end_profile()
+
+
 if __name__ == "__main__":
     train()
+    # benchmark_flops_profiler()
