@@ -49,7 +49,9 @@ class DummyDataset(Dataset):
 
 
 def get_model(input_dim=1024, output_dim=1024, hidden_dim=2048):
-    model = nn.Sequential(nn.Linear(input_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, output_dim, bias=False))
+    model = nn.Sequential(nn.Linear(input_dim, hidden_dim, bias=False),
+                          nn.GELU(),
+                          nn.Linear(hidden_dim, output_dim, bias=False))
     return model
 
 
